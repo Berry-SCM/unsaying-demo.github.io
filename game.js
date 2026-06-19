@@ -195,6 +195,8 @@ const _sfxDeny     = _mkAudio('Assets/Audio/sfx_deny.wav',     0.55);
 const _sfxSolve    = _mkAudio('Assets/Audio/sfx_solve.wav',    0.72);
 const _sfxComplete = _mkAudio('Assets/Audio/sfx_complete.wav', 0.68);
 const _sfxClick    = _mkAudio('Assets/Audio/sfx_click.wav',    0.58);
+const _sfxStamp    = _mkAudio('Assets/Audio/dispenser_stamp.wav', 0.65); // label re-stamped
+const _sfxTick     = _mkAudio('Assets/Audio/timer_tick.wav',    0.48); // countdown tick
 let   _eraseOn     = false;
 let   _denyTimer   = null;
 
@@ -231,6 +233,14 @@ function sndSolve() {
 function sndNudge() {
   if (!_audioUnlocked) return;
   _sfxClick.currentTime = 0; _sfxClick.play().catch(()=>{});
+}
+function sndStamp() {
+  if (!_audioUnlocked) return;
+  _sfxStamp.currentTime = 0; _sfxStamp.play().catch(()=>{});
+}
+function sndTick() {
+  if (!_audioUnlocked) return;
+  _sfxTick.currentTime = 0; _sfxTick.play().catch(()=>{});
 }
 function sndErase() { /* handled by startEraseSound / stopEraseSound */ }
 
@@ -398,6 +408,8 @@ class GObj {
     this.special = d.special ?? null;
     // Bird animation state
     this.birdAnimT = 0; this.birdFrame = 0;
+    // Regen / dispenser state
+    this._regenT = null; this._regenTicks = 0;
   }
   get pcx() { return this.isCirc ? this.cx : this.x + this.w/2; }
   get pcy() { return this.isCirc ? this.cy : this.y + this.h/2; }
@@ -435,6 +447,7 @@ class GObj {
     this.walkTx=null; this.walkTy=null; this.walked=false;
     this.flyTx=null;  this.flyTy=null;  this.arrived=false;
     this.birdAnimT=0; this.birdFrame=0;
+    this._regenT=null; this._regenTicks=0;
   }
 }
 
@@ -559,7 +572,7 @@ function buildLevel3() {
   return {
     id:3, name:'The Untouchable Wheel', bg:'warm',
     intro:['An old water wheel.','Two labels keep it frozen.','Labels are not facts.'],
-    pStart:{x:380,y:305}, walls,
+    pStart:{x:580,y:305}, walls,
     water:[{x:50,y:PZ.t,w:96,h:PZ.b-PZ.t}],
     decor:[
       {type:'boat', x:54, y:85, w:82, h:74},
@@ -1025,8 +1038,9 @@ function buildLevel17() {
       new GObj({id:'gate17',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='dial17')?.active === true,
+    regenRate:9, // cleared panels regen their label after 9 seconds — clear fast!
     grantLabel:null,
-    hint:'Six switches, then the dial. Same as before — but more of it.',
+    hint:'Six switches, then the dial. But the machine fights back.',
     solveMsg:'The second machine is quiet.',
   };
 }
@@ -1236,6 +1250,7 @@ function tick(dt) {
   else { tickMove(dt); tickErase(dt); tickEnterNudge(); }
 
   tickCreatures(dt); tickBird(dt); tickGates(dt); tickDoors(dt);
+  tickDispenser(dt);
   checkLevelEvents();
   G.flash = Math.max(0, G.flash - dt*2.5);
   if (G.notif.t > 0) G.notif.t -= dt;
@@ -1350,7 +1365,7 @@ function checkCircleSolids(p) {
 }
 
 // ── ERASE ─────────────────────────────────────────────────────────
-const ERASE_TIME = 0.44, ERASE_RANGE = 130;
+const ERASE_TIME = 0.44, ERASE_RANGE = 72;
 
 function tickErase(dt) {
   const p = G.player, lv = G.lv;
@@ -1408,7 +1423,7 @@ function allPanelsClear() {
 }
 
 // ── NUDGE ─────────────────────────────────────────────────────────
-const NUDGE_RANGE = 100, NUDGE_STEP = 0.03;
+const NUDGE_RANGE = 72, NUDGE_STEP = 0.03;
 let nudgeKeyHeld = 0, nudgeKeyDir = 0;
 
 function tickEnterNudge() {
@@ -1505,6 +1520,56 @@ function tickDoors(dt) {
     }
   }
 }
+// ── DISPENSER / REGEN MECHANIC ────────────────────────────────────
+// Levels with `regenRate` (seconds) cause cleared objects to get their
+// first label stamped back after that delay. Forces urgency.
+// Only panels, plants, and chests can regen. Gates/dial never regen.
+// Stops once the level's exitCond is satisfied.
+function tickDispenser(dt) {
+  const lv = G.lv;
+  if (!lv.regenRate) return;
+  // Don't regen if level is already solved
+  if (lv.exitCond && lv.exitCond(G.ls)) {
+    for (const o of lv.objs) o._regenT = null;
+    return;
+  }
+  const rate = lv.regenRate;
+  const REGEN_TYPES = new Set(['panel','plant','chest','lantern']);
+
+  for (const o of lv.objs) {
+    if (!REGEN_TYPES.has(o.type)) continue;
+    if (!o._initLbls || o._initLbls.length === 0) continue;
+
+    // Start countdown when object becomes newly neutral
+    if (o.isNeutral && o.active && o._regenT === null) {
+      o._regenT = rate;
+      o._regenTicks = 0;
+    }
+
+    if (o._regenT === null) continue;
+
+    o._regenT -= dt;
+    const t = o._regenT;
+
+    // Tick sounds at 3s, 2s, 1s remaining
+    if (t <= 3 && o._regenTicks < 1) { sndTick(); o._regenTicks = 1; }
+    if (t <= 2 && o._regenTicks < 2) { sndTick(); o._regenTicks = 2; }
+    if (t <= 1 && o._regenTicks < 3) { sndTick(); o._regenTicks = 3; }
+
+    if (o._regenT <= 0) {
+      // Re-stamp: restore the first wrong label, re-solidify
+      o.labels = [{ ...o._initLbls[0] }];
+      o.solid = true;
+      o.active = false;
+      o._regenT = null;
+      o._regenTicks = 0;
+      sndStamp();
+      spawnParts(o.pcx, o.pcy, '#e03020', 12);
+      showNotif('The machine stamps back...', '');
+    }
+  }
+}
+
 function checkLevelEvents() {
   if (G.lvIdx===5 && !G.ls.selfClear && G.player.selfLbls.length===0) G.ls.selfClear = true;
 }
@@ -1566,6 +1631,7 @@ function render() {
   }
   if (G.svAlpha > 0.01) drawSimpleView();
   drawParts();
+  drawDispenserTimers();
   drawDarkZone();
   if (G.flash > 0) { ctx.fillStyle=`rgba(230,210,150,${G.flash*0.2})`; ctx.fillRect(0,0,VW,VH); }
   drawHUD();
@@ -2109,6 +2175,41 @@ function drawLantern(o) {
       ctx.fillStyle=glow; ctx.beginPath(); ctx.arc(cx,fy+fh/2,o.w*2,0,Math.PI*2); ctx.fill();
       ctx.restore();
     }
+  }
+}
+
+// ── DISPENSER COUNTDOWN UI ────────────────────────────────────────
+// Draws a small pulsing arc above each object that is counting down to regen.
+function drawDispenserTimers() {
+  const lv = G.lv;
+  if (!lv.regenRate) return;
+  for (const o of lv.objs) {
+    if (o._regenT === null || o._regenT === undefined) continue;
+    const rate = lv.regenRate;
+    const prog  = Math.max(0, o._regenT / rate); // 1→0 as time runs out
+    const urgent = o._regenT <= 3;
+    const cx = o.pcx;
+    const cy = o.spriteTop - 14;
+    const R  = 9;
+
+    ctx.save();
+    // Pulsing alpha when urgent
+    if (urgent) ctx.globalAlpha = 0.65 + Math.sin(Date.now() * 0.012) * 0.35;
+    // Background ring
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 3.5;
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+    // Countdown arc (clockwise drain)
+    ctx.strokeStyle = urgent ? '#ff3020' : '#ff8800';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2);
+    ctx.stroke();
+    // Small dot at center
+    ctx.fillStyle = urgent ? '#ff3020' : '#ff8800';
+    ctx.globalAlpha = (urgent ? 0.9 : 0.6);
+    ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   }
 }
 
