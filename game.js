@@ -80,8 +80,17 @@ loadImg('intro_splash',    'intro/Intro_Screen.png'); // studio splash before me
 loadImg('studio_logo',     'intro/logo.png');         // BuzzHornet Studios logo for credits
 loadImg('bird_sheet',      'Assets/bird_sheet.png');   // 1000×250, 4 frames × 250px wide
 loadImg('birdhouse',       'Assets/birdhouse.png');    // 372×671
-loadImg('creature',        'Assets/creature.png');     // 500×500
-loadImg('creature_happy',  'Assets/creature_happy.png');
+loadImg('creature',        'Assets/creature.png');       // 500×500 neutral fallback
+loadImg('creature_happy',  'Assets/creature_happy.png'); // erased / at peace
+loadImg('creature_angry',  'Assets/creature_angry.png'); // labeled / hostile
+// Environment props — collision is only the pixel-art content region, not transparent padding
+loadImg('crate_prop',      'Assets/crate_png.png');      // 500×500, content 62%×64% centred
+loadImg('stone_pillar',    'Assets/stone_pillar.png');   // 316×790, content 62%w × 85%h centred
+loadImg('wooden_fence',    'Assets/wooden_fence.png');   // 707×353, content 71%w × 69%h centred
+loadImg('bridge_spr',      'Assets/bridge.png');           // pixel-art wooden bridge, top-down
+loadImg('wheel',           'Assets/wheel.png');           // square pixel-art wagon wheel, rotates with nudge
+loadImg('heart_full',      'Assets/heart_full.png');     // health HUD – full
+loadImg('heart_empty',     'Assets/heart_empty.png');    // health HUD – lost
 loadImg('mirror',          'Assets/mirror.png');       // 376×664
 loadImg('panel_on',          'Assets/panel_on.png');          // 600×416
 loadImg('panel_off',         'Assets/panel_off.png');
@@ -197,6 +206,7 @@ const _sfxComplete = _mkAudio('Assets/Audio/sfx_complete.wav', 0.68);
 const _sfxClick    = _mkAudio('Assets/Audio/sfx_click.wav',    0.58);
 const _sfxStamp    = _mkAudio('Assets/Audio/dispenser_stamp.wav', 0.65); // label re-stamped
 const _sfxTick     = _mkAudio('Assets/Audio/timer_tick.wav',    0.48); // countdown tick
+const _sfxHurt     = _mkAudio('Assets/Audio/sfx_hurt.wav',      0.75); // player takes damage
 let   _eraseOn     = false;
 let   _denyTimer   = null;
 
@@ -241,6 +251,10 @@ function sndStamp() {
 function sndTick() {
   if (!_audioUnlocked) return;
   _sfxTick.currentTime = 0; _sfxTick.play().catch(()=>{});
+}
+function sndHurt() {
+  if (!_audioUnlocked) return;
+  _sfxHurt.currentTime = 0; _sfxHurt.play().catch(()=>{});
 }
 function sndErase() { /* handled by startEraseSound / stopEraseSound */ }
 
@@ -410,6 +424,14 @@ class GObj {
     this.birdAnimT = 0; this.birdFrame = 0;
     // Regen / dispenser state
     this._regenT = null; this._regenTicks = 0;
+    // Patrol state
+    this.patrol = d.patrol ?? null;
+    this._patDir = 1;
+    // Contact-damage state (used by patrol creatures)
+    this._contactT = 0;
+    // Key / inventory mechanic
+    this.requiresItem = d.requiresItem ?? null;
+    this.grantItem    = d.grantItem    ?? null;
   }
   get pcx() { return this.isCirc ? this.cx : this.x + this.w/2; }
   get pcy() { return this.isCirc ? this.cy : this.y + this.h/2; }
@@ -448,6 +470,7 @@ class GObj {
     this.flyTx=null;  this.flyTy=null;  this.arrived=false;
     this.birdAnimT=0; this.birdFrame=0;
     this._regenT=null; this._regenTicks=0;
+    this._patDir=1; this._contactT=0;
   }
 }
 
@@ -491,39 +514,75 @@ function addTreeWalls(walls, decor) {
   }
 }
 
+// Adds collision walls for crate / pillar / fence decor items.
+// Collision is computed from the ACTUAL PIXEL CONTENT region of each sprite,
+// ignoring transparent padding.  Fractions measured empirically:
+//   crate:  left=19.6% top=16.8% right=18.6% bottom=19.4%  → content 61.8%×63.8%
+//   pillar: left=19.0% top= 6.1% right=19.0% bottom= 8.5%  → content 62.0%×85.4%
+//   fence:  left=14.6% top=15.6% right=14.6% bottom=15.9%  → content 70.9%×68.6%
+function addPropWalls(walls, decor) {
+  if (!decor) return;
+  for (const d of decor) {
+    const dw = d.w ?? 64, dh = d.h ?? 64;
+    if (d.type === 'crate') {
+      walls.push({
+        x: Math.round(d.x + dw * 0.196), y: Math.round(d.y + dh * 0.168),
+        w: Math.round(dw * 0.618),        h: Math.round(dh * 0.638),
+        _prop: true,
+      });
+    } else if (d.type === 'pillar') {
+      walls.push({
+        x: Math.round(d.x + dw * 0.190), y: Math.round(d.y + dh * 0.061),
+        w: Math.round(dw * 0.620),        h: Math.round(dh * 0.854),
+        _prop: true,
+      });
+    } else if (d.type === 'fence') {
+      walls.push({
+        x: Math.round(d.x + dw * 0.146), y: Math.round(d.y + dh * 0.156),
+        w: Math.round(dw * 0.709),        h: Math.round(dh * 0.686),
+        _prop: true,
+      });
+    }
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  LEVELS
 // ══════════════════════════════════════════════════════════════════
 
-// L0 — The Broken Door
+// L0 — The Locked Door
 function buildLevel0() {
   const walls = makeBorderWalls();
   walls.push({x:420,y:PZ.t,w:90,h:210-PZ.t});
   walls.push({x:420,y:300,w:90,h:PZ.b-300});
   return {
-    id:0, name:'The Broken Door', bg:'warm',
-    intro:['A door.','The label says: BROKEN.','But nothing here was broken — until it was named that way.'],
+    id:0, name:'The Locked Door', bg:'warm',
+    intro:['A door.','The label says: LOCKED.','But something nearby has been labeled SEALED.','Labels are just words. Start with what you can reach.'],
     pStart:{x:130,y:300}, walls, water:null,
     decor:[],
     objs:[
-      new GObj({id:'door',type:'door',x:420,y:210,w:90,h:90,
-        labels:[{text:'BROKEN',acc:false}],solid:true,tilt:0.04}),
+      new GObj({id:'chest0',type:'chest',x:148,y:418,w:62,h:50,
+        labels:[{text:'SEALED',acc:false}],solid:false,tilt:-0.03,
+        grantItem:'key0'}),
+      new GObj({id:'door0',type:'door',x:420,y:210,w:90,h:90,
+        labels:[{text:'LOCKED',acc:false}],solid:true,tilt:0.04,
+        requiresItem:'key0'}),
     ],
-    exitCond:()=>true,
+    exitCond:()=>G.lv.objs.find(o=>o.id==='door0')?.isNeutral,
     grantLabel:'OPENER',
-    hint:'Walk up to the door. Hold E to erase the label.',
-    solveMsg:'The door was never broken.',
+    hint:'Erase the chest\'s label first. Then use what you find on the door.',
+    solveMsg:'The door was never locked.',
   };
 }
 
 // L1 — The Unsafe Bridge
 function buildLevel1() {
   const walls = makeBorderWalls();
-  walls.push({x:370,y:PZ.t,w:170,h:258-PZ.t,isWater:true});
-  walls.push({x:370,y:346,w:170,h:PZ.b-346,isWater:true});
+  walls.push({x:370,y:PZ.t,w:170,h:262-PZ.t,isWater:true});
+  walls.push({x:370,y:342,w:170,h:PZ.b-342,isWater:true});
   return {
     id:1, name:'The Unsafe Bridge', bg:'grass',
-    intro:['A river crossing.','Two labels on the bridge.','Neither of them true.'],
+    intro:['A river crossing.','The bridge: UNSAFE. DO NOT CROSS.','Neither label is true.','Something was left behind on the other side.'],
     pStart:{x:150,y:300}, walls,
     water:[{x:370,y:PZ.t,w:170,h:PZ.b-PZ.t}],
     decor:(()=>{const d=[
@@ -535,11 +594,15 @@ function buildLevel1() {
     objs:[
       new GObj({id:'bridge',type:'bridge',x:370,y:258,w:170,h:88,
         labels:[{text:'UNSAFE',acc:false},{text:'DO NOT CROSS',acc:false}],solid:true,tilt:-0.03}),
+      new GObj({id:'chest1',type:'chest',x:790,y:400,w:72,h:58,
+        labels:[{text:'FORGOTTEN',acc:false}],solid:false,tilt:0.03}),
+      new GObj({id:'gate1',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
-    exitCond:()=>true,
+    exitCond:()=>G.lv.objs.find(o=>o.id==='bridge')?.isNeutral &&
+                 G.lv.objs.find(o=>o.id==='chest1')?.isNeutral,
     grantLabel:'CROSSER',
-    hint:'The bridge has two wrong labels. Erase both.',
-    solveMsg:'The bridge was safe all along.',
+    hint:'Clear the bridge, cross over, then find what was left behind.',
+    solveMsg:'Nothing is forgotten anymore.',
   };
 }
 
@@ -550,17 +613,22 @@ function buildLevel2() {
   walls.push({x:450,y:388,w:64,h:PZ.b-388});
   return {
     id:2, name:'The Dangerous Creature', bg:'warm',
-    intro:['A creature blocks the path.','It has kind eyes.','But the label makes it frightening.'],
+    intro:['A creature blocks the path.','It has kind eyes.','But the label makes it frightening.','Not every label here is wrong. Read carefully.'],
     pStart:{x:140,y:305}, walls, water:null,
     decor:[],
     objs:[
+      new GObj({id:'plant2',type:'plant',x:280,y:390,w:55,h:74,
+        labels:[{text:'DISEASED',acc:false}],solid:false,tilt:-0.03}),
       new GObj({id:'creature',type:'creature',x:492,y:306,r:72,
         labels:[{text:'DANGEROUS',acc:false}],solid:true,tilt:0.05}),
+      new GObj({id:'gentle2',type:'creature',x:750,y:430,r:42,
+        labels:[{text:'GENTLE',acc:true}],solid:false,tilt:0.04}),
       new GObj({id:'gate2',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
-    exitCond:()=>G.lv.objs.find(o=>o.id==='creature')?.isNeutral === true,
+    exitCond:()=>G.lv.objs.find(o=>o.id==='creature')?.isNeutral === true &&
+                 G.lv.objs.find(o=>o.id==='plant2')?.isNeutral === true,
     grantLabel:'PEACEMAKER',
-    hint:'The creature is blocking the way. Look at its label.',
+    hint:'Erase DANGEROUS and DISEASED. Leave GENTLE alone — it\'s true.',
     solveMsg:'It was never dangerous.',
   };
 }
@@ -602,7 +670,10 @@ function buildLevel4() {
       {type:'tree', col:0, x:52,  y:430, w:68, h:92},
       {type:'tree', col:1, x:288, y:108, w:80, h:110},
       {type:'tree', col:3, x:540, y:430, w:75, h:122},
-    ]; addTreeWalls(walls,d); return d; })(),
+      // Fence sections along garden edges — purely aesthetic corners
+      {type:'fence', x:640, y:460, w:116, h:50},
+      {type:'fence', x:390, y: 68, w:116, h:50},
+    ]; addTreeWalls(walls,d); addPropWalls(walls,d); return d; })(),
     objs:[
       new GObj({id:'bird',type:'bird',x:380,y:320,r:24,
         labels:[{text:'PEST',acc:false}],solid:false,tilt:0.06}),
@@ -624,7 +695,13 @@ function buildLevel5() {
     id:5, name:'The Mirror', bg:'warm',
     intro:['You\'ve been collecting labels along the way.','Words others placed on you.','The mirror shows them.','Look — and let them go.'],
     pStart:{x:160,y:305}, walls, water:null,
-    decor:[],
+    decor:(()=>{const d=[
+      // Stone pillars at four room corners — ornate chamber feel, don't block the mirror
+      {type:'pillar', x: 54, y: 46, w:32, h:88},
+      {type:'pillar', x:874, y: 46, w:32, h:88},
+      {type:'pillar', x: 54, y:460, w:32, h:88},
+      {type:'pillar', x:874, y:460, w:32, h:88},
+    ]; addPropWalls(walls,d); return d; })(),
     objs:[
       new GObj({id:'mirror',type:'mirror',x:400,y:130,w:175,h:310,labels:[],solid:true}),
       new GObj({id:'gate5',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
@@ -644,7 +721,13 @@ function buildLevel6() {
     id:6, name:'The Labeling Machine', bg:'dark',
     intro:['This is the source.','A machine that labeled the world.','Every wrong name came from here.','Turn it off.'],
     pStart:{x:120,y:490}, walls, water:null,
-    decor:[],
+    decor:(()=>{const d=[
+      // Storage crates flanking the machine at top — industrial clutter along the back wall
+      {type:'crate', x: 54, y: 44, w:58, h:58},
+      {type:'crate', x:118, y: 44, w:58, h:58},
+      {type:'crate', x:762, y: 44, w:58, h:58},
+      {type:'crate', x:826, y: 44, w:58, h:58},
+    ]; addPropWalls(walls,d); return d; })(),
     objs:[
       new GObj({id:'panelA',type:'panel',x:228,y:381,w:100,h:68,
         labels:[{text:'RUNNING',acc:false}],solid:true,tilt:0.02}),
@@ -662,8 +745,9 @@ function buildLevel6() {
       new GObj({id:'gate6',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='dial')?.active === true,
+    regenRate:6, // panels re-stamp after 6s — the machine resists being stopped
     grantLabel:null,
-    hint:'Clear all four panels. Then the dial becomes reachable.',
+    hint:'Clear all four panels fast. The machine fights back.',
     solveMsg:'The machine is quiet.',
   };
 }
@@ -687,7 +771,9 @@ function buildLevel7() {
       {type:'tree', col:2, x:52,  y:420, w:88, h:115},
       {type:'tree', col:3, x:648, y:108, w:75, h:128},
       {type:'tree', col:0, x:828, y:415, w:68, h:92},
-    ]; addTreeWalls(walls,d); return d; })(),
+      // Fence in lower-right corner — the garden had boundaries once
+      {type:'fence', x:430, y:460, w:116, h:50},
+    ]; addTreeWalls(walls,d); addPropWalls(walls,d); return d; })(),
     objs:[
       new GObj({id:'p1',type:'plant',x:210,y:80,w:60,h:80,
         labels:[{text:'DEAD',acc:false}],solid:true,tilt:0.04}),
@@ -700,8 +786,9 @@ function buildLevel7() {
       new GObj({id:'gate7',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>['p1','p2','p3'].every(id=>G.lv.objs.find(o=>o.id===id)?.isNeutral),
+    regenRate:8, // backup unit keeps re-labeling the plants
     grantLabel:null,
-    hint:'Three wrong labels. One true one. Know the difference.',
+    hint:'Three wrong labels. One true one. The backup unit keeps re-stamping.',
     solveMsg:'The garden blooms.',
   };
 }
@@ -712,14 +799,14 @@ function buildLevel7() {
 function buildLevel8() {
   const walls = makeBorderWalls();
   // River walls with gap at y:244–344 where bridge sits
-  walls.push({x:310,y:PZ.t,  w:130,h:244-PZ.t,  isWater:true});
-  walls.push({x:310,y:344,   w:130,h:PZ.b-344,   isWater:true});
+  walls.push({x:310,y:PZ.t,  w:130,h:248-PZ.t,  isWater:true});
+  walls.push({x:310,y:340,   w:130,h:PZ.b-340,   isWater:true});
   // Creature corridor walls (gap at y:224–388)
   walls.push({x:570,y:PZ.t,  w:50, h:224-PZ.t});
   walls.push({x:570,y:388,   w:50, h:PZ.b-388});
   return {
     id:8, name:'The Crossing', bg:'grass',
-    intro:['A river separates you from a creature.','The bridge calls itself ROTTEN.','The creature calls itself LOST.','Both labels are lies.'],
+    intro:['A river separates you from a creature.','The bridge calls itself ROTTEN.','The creature calls itself LOST.','Something ABANDONED waits beyond.'],
     pStart:{x:120,y:300}, walls,
     water:[{x:310,y:PZ.t,w:130,h:PZ.b-PZ.t}],
     decor:(()=>{const d=[
@@ -732,12 +819,15 @@ function buildLevel8() {
         labels:[{text:'ROTTEN',acc:false}],solid:true,tilt:-0.02}),
       new GObj({id:'cr8',type:'creature',x:636,y:306,r:66,
         labels:[{text:'LOST',acc:false}],solid:true,tilt:0.04}),
+      new GObj({id:'chest8',type:'chest',x:820,y:420,w:70,h:56,
+        labels:[{text:'ABANDONED',acc:false}],solid:false,tilt:-0.02}),
       new GObj({id:'gate8',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='bridge8')?.isNeutral &&
-                 G.lv.objs.find(o=>o.id==='cr8')?.isNeutral,
+                 G.lv.objs.find(o=>o.id==='cr8')?.isNeutral &&
+                 G.lv.objs.find(o=>o.id==='chest8')?.isNeutral,
     grantLabel:null,
-    hint:'Clear the bridge first. Then deal with what waits on the other side.',
+    hint:'Bridge, then creature, then what was left behind.',
     solveMsg:'The crossing is clear.',
   };
 }
@@ -754,7 +844,7 @@ function buildLevel9() {
   walls.push({x:580,y:366,   w:50, h:PZ.b-366});
   return {
     id:9, name:'The Dark Hall', bg:'dark',
-    intro:['The hall has no light.','A lantern stands in the way, labeled DEAD.','Beyond it, something lurks.','The darkness hides what labels do not.'],
+    intro:['The hall has no light.','A lantern stands in the way, labeled DEAD.','Beyond it, something lurks.','And something else, forgotten in the dark.'],
     pStart:{x:120,y:300}, walls, water:null,
     decor:[],
     darkZone:{x:400, litBy:'ln9'},
@@ -763,27 +853,33 @@ function buildLevel9() {
         labels:[{text:'DEAD',acc:false}],solid:true,tilt:0.02}),
       new GObj({id:'cr9',type:'creature',x:646,y:300,r:66,
         labels:[{text:'LURKING',acc:false}],solid:true,tilt:-0.04}),
+      new GObj({id:'plant9',type:'plant',x:820,y:390,w:52,h:70,
+        labels:[{text:'WITHERED',acc:false}],solid:false,tilt:0.04}),
       new GObj({id:'gate9',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='ln9')?.isNeutral &&
-                 G.lv.objs.find(o=>o.id==='cr9')?.isNeutral,
+                 G.lv.objs.find(o=>o.id==='cr9')?.isNeutral &&
+                 G.lv.objs.find(o=>o.id==='plant9')?.isNeutral,
     grantLabel:null,
-    hint:'Light the lantern. Face what was hiding.',
+    hint:'Light the lantern. Face what was hiding. Then find what was forgotten.',
     solveMsg:'The hall is clear.',
   };
 }
 
 // L10 — The Forgotten Nest
-// A creature labeled FERAL blocks the path to a birdhouse labeled ABANDONED.
-// Must clear the creature first, then reach the birdhouse.
+// Two creatures block the path. First FERAL, then RESTLESS near the nest.
+// Must clear both, then fix the birdhouse and the bird.
 function buildLevel10() {
   const walls = makeBorderWalls();
-  // Creature gap at y:220–390
+  // First creature corridor gap at y:220–390
   walls.push({x:430,y:PZ.t, w:55, h:220-PZ.t});
   walls.push({x:430,y:390,  w:55, h:PZ.b-390});
+  // Second creature corridor gap at y:238–372 (r:52 at cy:305)
+  walls.push({x:650,y:PZ.t, w:50, h:238-PZ.t});
+  walls.push({x:650,y:372,  w:50, h:PZ.b-372});
   return {
     id:10, name:'The Forgotten Nest', bg:'garden',
-    intro:['A bird has nowhere to go.','A creature guards the only house.','The creature is not FERAL.','The bird is not a STRAY.','Everything here just needs its name removed.'],
+    intro:['A bird has nowhere to go.','Two creatures block the way.','Neither label is earned.','The house is waiting.'],
     pStart:{x:130,y:305}, walls, water:null,
     decor:(()=>{const d=[
       {type:'tree', col:2, x:52,  y:408, w:88, h:115},
@@ -795,13 +891,15 @@ function buildLevel10() {
         labels:[{text:'STRAY',acc:false}],solid:false,tilt:0.05}),
       new GObj({id:'cr10',type:'creature',x:496,y:305,r:66,
         labels:[{text:'FERAL',acc:false}],solid:true,tilt:0.03}),
-      new GObj({id:'nest10',type:'birdhouse',x:740,y:160,w:55,h:99,
+      new GObj({id:'cr10b',type:'creature',x:714,y:305,r:52,
+        labels:[{text:'RESTLESS',acc:false}],solid:true,tilt:-0.04}),
+      new GObj({id:'nest10',type:'birdhouse',x:820,y:160,w:55,h:99,
         labels:[{text:'ABANDONED',acc:false}],solid:true,tilt:-0.03}),
       new GObj({id:'gate10',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:(s)=>s.birdHome,
     grantLabel:null,
-    hint:'Move the creature. Free the bird. Fix the house.',
+    hint:'Two creatures, one bird, one house. Clear the path step by step.',
     solveMsg:'Home found.',
   };
 }
@@ -811,13 +909,13 @@ function buildLevel10() {
 function buildLevel11() {
   const walls = makeBorderWalls();
   // River gap at y:250–350 for bridge
-  walls.push({x:290,y:PZ.t, w:110,h:250-PZ.t, isWater:true});
-  walls.push({x:290,y:350,  w:110,h:PZ.b-350,  isWater:true});
+  walls.push({x:290,y:PZ.t, w:110,h:254-PZ.t, isWater:true});
+  walls.push({x:290,y:346,  w:110,h:PZ.b-346,  isWater:true});
   // Wheel platform wall — narrow top gap only
   walls.push({x:550,y:PZ.t, w:30, h:180-PZ.t});
   return {
     id:11, name:'The Old Mill', bg:'grass',
-    intro:['An old mill, silent.','The bridge: FLOODED.','The wheel: SEIZED.','Neither is true — they just stopped being used.'],
+    intro:['An old mill, silent.','The bridge: FLOODED.','The wheel: SEIZED.','A chest left RUSTED by the wheel.','None of these names are true.'],
     pStart:{x:120,y:300}, walls,
     water:[{x:290,y:PZ.t,w:110,h:PZ.b-PZ.t}],
     decor:(()=>{const d=[
@@ -828,14 +926,18 @@ function buildLevel11() {
     objs:[
       new GObj({id:'br11',type:'bridge',x:290,y:250,w:110,h:100,
         labels:[{text:'FLOODED',acc:false}],solid:true,tilt:0.02}),
+      new GObj({id:'chest11',type:'chest',x:440,y:390,w:68,h:54,
+        labels:[{text:'RUSTED',acc:false}],solid:false,tilt:0.02}),
       new GObj({id:'wh11',type:'wheel',x:480,y:210,r:68,
         labels:[{text:'SEIZED',acc:false},{text:'OUT OF ORDER',acc:false}],solid:false,tilt:0.0,
         nudge:{value:0.6,target:0.0,tol:0.08,range:0.65,dir:0}}),
       new GObj({id:'gate11',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
-    exitCond:(s)=>s.wheelAligned && G.lv.objs.find(o=>o.id==='br11')?.isNeutral,
+    exitCond:(s)=>s.wheelAligned &&
+                  G.lv.objs.find(o=>o.id==='br11')?.isNeutral &&
+                  G.lv.objs.find(o=>o.id==='chest11')?.isNeutral,
     grantLabel:null,
-    hint:'Erase the bridge, cross over, then align the wheel.',
+    hint:'Bridge, then the chest by the wheel, then align the wheel itself.',
     solveMsg:'The mill turns again.',
   };
 }
@@ -874,8 +976,9 @@ function buildLevel12() {
       new GObj({id:'gate12',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>['sp1','sp2','sp3','sp4'].every(id=>G.lv.objs.find(o=>o.id===id)?.isNeutral),
+    regenRate:7, // the garden keeps sprawling — clear all four before they regrow
     grantLabel:null,
-    hint:'SPRAWLING is wrong. HARDY is right.',
+    hint:'SPRAWLING is wrong. HARDY is right. And the garden won\'t stay clear for long.',
     solveMsg:'The path is clear.',
   };
 }
@@ -899,18 +1002,19 @@ function buildLevel13() {
         labels:[{text:'TAME',acc:true}],solid:false,tilt:-0.03}),
       // Feral one blocks the exit corridor
       new GObj({id:'cr13b',type:'creature',x:626,y:300,r:66,
-        labels:[{text:'FERAL',acc:false}],solid:true,tilt:0.04}),
+        labels:[{text:'FERAL',acc:false}],solid:true,tilt:0.04,
+        patrol:{x1:626,x2:820,spd:65}}),
       new GObj({id:'gate13',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='cr13b')?.isNeutral,
     grantLabel:null,
-    hint:'Don\'t erase what\'s true. Erase what isn\'t.',
+    hint:'Don\'t erase what\'s true. Wait for the FERAL one to move, then erase it.',
     solveMsg:'One beast at peace.',
   };
 }
 
-// L14 — The Three Spooked
-// Three creatures labeled SPOOKED block different areas of an open room.
+// L14 — The Frenzied Three
+// Three creatures labeled FRENZIED block different corridors.
 // All three must be calmed to open the gate.
 function buildLevel14() {
   const walls = makeBorderWalls();
@@ -925,22 +1029,25 @@ function buildLevel14() {
   walls.push({x:700,y:PZ.t,  w:50, h:243-PZ.t});
   walls.push({x:700,y:367,   w:50, h:PZ.b-367});
   return {
-    id:14, name:'The Three Spooked', bg:'warm',
-    intro:['Three creatures, all labeled SPOOKED.','Fear given a name becomes permanent.','Remove the name.','Let them rest.'],
+    id:14, name:'The Frenzied Three', bg:'warm',
+    intro:['Three creatures, all labeled FRENZIED.','A wrong name given to a frightened thing.','Remove the name.','They were never feral.'],
     pStart:{x:120,y:305}, walls, water:null,
     decor:[],
     objs:[
       new GObj({id:'cr14a',type:'creature',x:398,y:294,r:62,
-        labels:[{text:'SPOOKED',acc:false}],solid:true,tilt:0.03}),
+        labels:[{text:'FRENZIED',acc:false}],solid:true,tilt:0.03,
+        patrol:{y1:275,y2:313,spd:28}}),
       new GObj({id:'cr14b',type:'creature',x:618,y:325,r:62,
-        labels:[{text:'SPOOKED',acc:false}],solid:true,tilt:-0.04}),
+        labels:[{text:'FRENZIED',acc:false}],solid:true,tilt:-0.04,
+        patrol:{y1:306,y2:344,spd:32}}),
       new GObj({id:'cr14c',type:'creature',x:818,y:305,r:62,
-        labels:[{text:'SPOOKED',acc:false}],solid:true,tilt:0.05}),
+        labels:[{text:'FRENZIED',acc:false}],solid:true,tilt:0.05,
+        patrol:{y1:286,y2:324,spd:25}}),
       new GObj({id:'gate14',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>['cr14a','cr14b','cr14c'].every(id=>G.lv.objs.find(o=>o.id===id)?.isNeutral),
     grantLabel:null,
-    hint:'Calm them one by one.',
+    hint:'They\'re frenzied — they shift. Time your approach and erase each one.',
     solveMsg:'All at ease.',
   };
 }
@@ -959,12 +1066,16 @@ function buildLevel15() {
   walls.push({x:640,y:360,   w:50, h:PZ.b-360});
   return {
     id:15, name:'The Sealed Wing', bg:'warm',
-    intro:['A sealed door. Something is kept inside.','One creature truly is DOCILE — leave it.','Another is labeled CONFINED — that label is wrong.','Erase only the false one.'],
+    intro:['Something here was lost before you arrived.','A door says LOCKED. A chest says LOST.','One creature truly is DOCILE — don\'t touch it.','Find what\'s lost, open what\'s locked.'],
     pStart:{x:140,y:305}, walls, water:null,
     decor:[],
     objs:[
+      new GObj({id:'chest15',type:'chest',x:230,y:415,w:62,h:50,
+        labels:[{text:'LOST',acc:false}],solid:false,tilt:-0.02,
+        grantItem:'key15'}),
       new GObj({id:'door15',type:'door',x:370,y:220,w:60,h:90,
-        labels:[{text:'SEALED',acc:false}],solid:true,tilt:0.0}),
+        labels:[{text:'LOCKED',acc:false}],solid:true,tilt:0.0,
+        requiresItem:'key15'}),
       new GObj({id:'cr15b',type:'creature',x:500,y:420,r:44,
         labels:[{text:'DOCILE',acc:true}],solid:false,tilt:-0.02}),
       new GObj({id:'cr15a',type:'creature',x:665,y:300,r:60,
@@ -973,7 +1084,7 @@ function buildLevel15() {
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='cr15a')?.isNeutral,
     grantLabel:'TRAVELER',
-    hint:'Open the door first. Erase CONFINED, not DOCILE.',
+    hint:'Find the LOST key first, then unlock the door. Leave DOCILE — it\'s true.',
     solveMsg:'The wing is open.',
   };
 }
@@ -994,14 +1105,15 @@ function buildLevel16() {
     decor:[],
     objs:[
       new GObj({id:'cr16',type:'creature',x:426,y:305,r:66,
-        labels:[{text:'PHANTOM',acc:false}],solid:true,tilt:-0.04,special:'vanish'}),
+        labels:[{text:'PHANTOM',acc:false}],solid:true,tilt:-0.04,special:'vanish',
+        patrol:{y1:282,y2:328,spd:42}}),
       new GObj({id:'mir16',type:'mirror',x:600,y:130,w:175,h:310,labels:[],solid:true}),
       new GObj({id:'gate16',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:()=>G.lv.objs.find(o=>o.id==='cr16')?.isNeutral &&
                  G.player.selfLbls.length === 0,
     grantLabel:null,
-    hint:'Clear the creature. Then face the mirror.',
+    hint:'The phantom shifts. Find its pattern, then erase it. Then face the mirror.',
     solveMsg:'Nothing left to carry.',
   };
 }
@@ -1012,13 +1124,15 @@ function buildLevel16() {
 function buildLevel17() {
   const walls = makeBorderWalls();
   // No separate engine wall — the dial object itself covers the full machine area
-  // Inner column to force navigation
-  walls.push({x:430,y:365,w:30, h:100});
   return {
     id:17, name:'The Second Machine', bg:'dark',
     intro:['There was another one.','A second machine, deeper in.','Six switches. One dial.','You\'ve done this before.'],
     pStart:{x:100,y:490}, walls, water:null,
-    decor:[],
+    decor:(()=>{const d=[
+      // Crates stacked in top-left corner — left of the machine dial (dial starts at x:140)
+      {type:'crate', x: 52, y: 56, w:56, h:56},
+      {type:'crate', x: 52, y:120, w:56, h:56},
+    ]; addPropWalls(walls,d); return d; })(),
     objs:[
       new GObj({id:'pA',type:'panel',x:158,y:372,w:90,h:62,
         labels:[{text:'ACTIVE',acc:false}],  solid:true,tilt:0.02}),
@@ -1051,14 +1165,17 @@ function buildLevel17() {
 function buildLevel18() {
   const walls = makeBorderWalls();
   // River 1 gap at y:248–360
-  walls.push({x:250,y:PZ.t, w:100,h:248-PZ.t, isWater:true});
-  walls.push({x:250,y:360,  w:100,h:PZ.b-360,  isWater:true});
+  walls.push({x:250,y:PZ.t, w:100,h:252-PZ.t, isWater:true});
+  walls.push({x:250,y:356,  w:100,h:PZ.b-356,  isWater:true});
   // River 2 gap at y:248–360 (same height for simplicity)
-  walls.push({x:540,y:PZ.t, w:100,h:248-PZ.t, isWater:true});
-  walls.push({x:540,y:360,  w:100,h:PZ.b-360,  isWater:true});
+  walls.push({x:540,y:PZ.t, w:100,h:252-PZ.t, isWater:true});
+  walls.push({x:540,y:356,  w:100,h:PZ.b-356,  isWater:true});
+  // Creature corridor between river 2 and wheel: gap y:246–364 (cr18 r:59 at cy:305)
+  walls.push({x:680,y:PZ.t, w:50, h:246-PZ.t});
+  walls.push({x:680,y:364,  w:50, h:PZ.b-364});
   return {
     id:18, name:'The Long Bridge', bg:'grass',
-    intro:['Two rivers block the path.','Two bridges, wrongly named.','A wheel frozen at the end.','The world keeps calling things what they\'re not.'],
+    intro:['Two rivers block the path.','Two bridges, wrongly named.','Something STRANDED beyond the second.','A wheel frozen at the end.'],
     pStart:{x:110,y:305}, walls,
     water:[{x:250,y:PZ.t,w:100,h:PZ.b-PZ.t},{x:540,y:PZ.t,w:100,h:PZ.b-PZ.t}],
     decor:(()=>{const d=[
@@ -1072,16 +1189,19 @@ function buildLevel18() {
         labels:[{text:'UNSAFE',acc:false}],solid:true,tilt:-0.02}),
       new GObj({id:'br18b',type:'bridge',x:540,y:248,w:100,h:112,
         labels:[{text:'ROTTEN',acc:false}],solid:true,tilt:0.03}),
-      new GObj({id:'wh18',type:'wheel',x:770,y:270,r:68,
+      new GObj({id:'cr18',type:'creature',x:739,y:305,r:59,
+        labels:[{text:'STRANDED',acc:false}],solid:true,tilt:-0.03}),
+      new GObj({id:'wh18',type:'wheel',x:830,y:270,r:62,
         labels:[{text:'FROZEN',acc:false},{text:'BROKEN',acc:false}],solid:false,tilt:0.0,
         nudge:{value:0.55,target:0.0,tol:0.08,range:0.6,dir:0}}),
       new GObj({id:'gate18',type:'gate',x:EXIT_X,y:EXIT_Y,w:EXIT_W,h:EXIT_H,labels:[],solid:true}),
     ],
     exitCond:(s)=>s.wheelAligned &&
                   G.lv.objs.find(o=>o.id==='br18a')?.isNeutral &&
-                  G.lv.objs.find(o=>o.id==='br18b')?.isNeutral,
+                  G.lv.objs.find(o=>o.id==='br18b')?.isNeutral &&
+                  G.lv.objs.find(o=>o.id==='cr18')?.isNeutral,
     grantLabel:null,
-    hint:'Two bridges, then the wheel. Left to right.',
+    hint:'Two bridges, one creature, then the wheel.',
     solveMsg:'The long crossing complete.',
   };
 }
@@ -1096,8 +1216,8 @@ function buildLevel19() {
   walls.push({x:300,y:PZ.t, w:65, h:220-PZ.t});
   walls.push({x:300,y:310,  w:65, h:PZ.b-310});
   // River after the door — gap at y:240–360 for bridge
-  walls.push({x:500,y:PZ.t, w:110,h:240-PZ.t, isWater:true});
-  walls.push({x:500,y:360,  w:110,h:PZ.b-360,  isWater:true});
+  walls.push({x:500,y:PZ.t, w:110,h:244-PZ.t, isWater:true});
+  walls.push({x:500,y:356,  w:110,h:PZ.b-356,  isWater:true});
   // Creature corridor: gap matches cr19 diameter (r:66→y:236–368)
   walls.push({x:710,y:PZ.t, w:50, h:236-PZ.t});
   walls.push({x:710,y:368,  w:50, h:PZ.b-368});
@@ -1157,7 +1277,9 @@ const G = {
   lvIdx: 0, lv: null, ls: {},
   player: {
     x:130, y:305, r:22, spd:220,
+    hp: 3, maxHp: 3, hurtT: 0,
     selfLbls: [], labelAnim: 0,
+    inventory: [],
     // Animation state
     dir: 'south',      // last facing direction
     moving: false,
@@ -1169,9 +1291,10 @@ const G = {
   sv: false, svAlpha: 0,
   nudgeMode: false, nudgeTarget: null,
   eraseHold: 0, eraseTarget: null,
-  denyNotif: 0,
+  denyNotif: 0, denyMsg: '',
   notif: {text:'',sub:'',t:0},
   flash: 0,
+  dmgFlash: 0,
   completeClock: 0,
   endingT: 0,
   introCard: {active:false, age:0, closing:false, closeAge:0, lines:[]},
@@ -1193,7 +1316,9 @@ function loadLevel(idx) {
   G.sv=false; G.svAlpha=0;
   G.nudgeMode=false; G.nudgeTarget=null;
   G.eraseHold=0; G.eraseTarget=null;
-  G.denyNotif=0; G.flash=0;
+  G.denyNotif=0; G.denyMsg=''; G.flash=0; G.dmgFlash=0;
+  G.player.hp = G.player.maxHp; G.player.hurtT = 0;
+  G.player.inventory = [];
   G.scene = 'play'; parts.length = 0;
   if (lv.intro && lv.intro.length) {
     G.introCard = {active:true, age:0, closing:false, closeAge:0, lines:lv.intro};
@@ -1214,7 +1339,9 @@ function resetLevel() {
   G.sv=false; G.svAlpha=0;
   G.nudgeMode=false; G.nudgeTarget=null;
   G.eraseHold=0; G.eraseTarget=null;
-  G.denyNotif=0; G.flash=0;
+  G.denyNotif=0; G.denyMsg=''; G.flash=0; G.dmgFlash=0;
+  G.player.hp = G.player.maxHp; G.player.hurtT = 0;
+  G.player.inventory = [];
   parts.length = 0;
   G.introCard = {active:false, age:0, closing:false, closeAge:0, lines:[]};
 }
@@ -1251,8 +1378,10 @@ function tick(dt) {
 
   tickCreatures(dt); tickBird(dt); tickGates(dt); tickDoors(dt);
   tickDispenser(dt);
+  tickCreatureDamage(dt);
   checkLevelEvents();
-  G.flash = Math.max(0, G.flash - dt*2.5);
+  G.flash    = Math.max(0, G.flash    - dt*2.5);
+  G.dmgFlash = Math.max(0, G.dmgFlash - dt*3.0);
   if (G.notif.t > 0) G.notif.t -= dt;
   if (G.denyNotif > 0) G.denyNotif -= dt;
   for (const o of G.lv.objs) if (o.shakeT > 0) o.shakeT = Math.max(0, o.shakeT - dt);
@@ -1309,13 +1438,16 @@ function tickMove(dt) {
   const solids = getSolids();
   let nx = p.x + dx*p.spd*dt;
   for (const s of solids) {
-    if (circleRect(nx,p.y,p.r,s.x,s.y,s.w,s.h))
-      nx = dx>0 ? s.x-p.r-0.5 : s.x+s.w+p.r+0.5;
+    if (circleRect(nx,p.y,p.r,s.x,s.y,s.w,s.h)) {
+      // Use pre-move X to pick the correct side — avoids teleportation when squeezed
+      nx = p.x <= s.x + s.w/2 ? s.x - p.r - 0.5 : s.x + s.w + p.r + 0.5;
+    }
   }
   let ny = p.y + dy*p.spd*dt;
   for (const s of solids) {
-    if (circleRect(p.x,ny,p.r,s.x,s.y,s.w,s.h))
-      ny = dy>0 ? s.y-p.r-0.5 : s.y+s.h+p.r+0.5;
+    if (circleRect(p.x,ny,p.r,s.x,s.y,s.w,s.h)) {
+      ny = p.y <= s.y + s.h/2 ? s.y - p.r - 0.5 : s.y + s.h + p.r + 0.5;
+    }
   }
   p.x = clamp(nx, p.r, VW-p.r);
   p.y = clamp(ny, p.r, VH-p.r);
@@ -1404,10 +1536,23 @@ function tickErase(dt) {
         }
       } else if (G.eraseTarget.canErase) {
         const o = G.eraseTarget;
-        o.erase();
-        // solveMsg is shown in tickGates when the gate actually opens, not per-erase
+        if (o.requiresItem && !G.player.inventory.includes(o.requiresItem)) {
+          // Needs a key — show specific message, not "that label is correct"
+          o.shakeT = 0.5; sndCant(); G.denyNotif = 2.0;
+          G.denyMsg = 'You need a key for this.';
+          showNotif('Find something to open it with first.', '', 2.0);
+        } else {
+          o.erase();
+          // Grant item when object becomes neutral and has grantItem
+          if (o.isNeutral && o.grantItem && !G.player.inventory.includes(o.grantItem)) {
+            G.player.inventory.push(o.grantItem);
+            showNotif('Key found.', '', 2.5);
+            spawnParts(o.pcx, o.pcy, '#d4a830', 14);
+          }
+        }
       } else {
         G.eraseTarget.shakeT = 0.5; sndCant(); G.denyNotif = 2.0;
+        G.denyMsg = '';
       }
     }
   } else {
@@ -1469,6 +1614,19 @@ function tickNudge(dt) {
 function tickCreatures(dt) {
   for (const o of G.lv.objs) {
     if (o.type !== 'creature') continue;
+    // Patrol movement — only while creature has labels and hasn't started walking away
+    if (o.patrol && !o.isNeutral && !o.walked && o.walkTx === null) {
+      const { x1, x2, y1, y2, spd: pspd } = o.patrol;
+      if (x1 !== undefined) {
+        o.cx += o._patDir * pspd * dt;
+        if (o.cx >= x2) { o.cx = x2; o._patDir = -1; }
+        if (o.cx <= x1) { o.cx = x1; o._patDir =  1; }
+      } else if (y1 !== undefined) {
+        o.cy += o._patDir * pspd * dt;
+        if (o.cy >= y2) { o.cy = y2; o._patDir = -1; }
+        if (o.cy <= y1) { o.cy = y1; o._patDir =  1; }
+      }
+    }
     if (o.isNeutral && !o.walked && o.walkTx === null) {
       // Walk right through the exit rather than falling through walls
       o.walkTx = EXIT_X + 80; o.walkTy = o.cy;
@@ -1570,6 +1728,60 @@ function tickDispenser(dt) {
   }
 }
 
+// ── CREATURE PATROL DAMAGE ────────────────────────────────────────
+// Only patrolling creatures deal contact damage.
+// Stationary blockers (L2 DANGEROUS, L8 LOST, etc.) push player
+// as before — they don't chip health. This keeps early levels playable.
+// A 0.35s contact timer prevents instant-damage if player clips a corner.
+function tickCreatureDamage(dt) {
+  const p = G.player;
+  // Tick down immunity
+  if (p.hurtT > 0) {
+    p.hurtT = Math.max(0, p.hurtT - dt);
+    // Clear all contact timers while immune so we don't double-fire on recovery
+    for (const o of G.lv.objs) o._contactT = 0;
+    return;
+  }
+
+  for (const o of G.lv.objs) {
+    if (o.type !== 'creature') continue;
+    if (!o.patrol) continue;          // only patrol creatures are hazardous
+    if (!o.hasLabel || !o.visible) { o._contactT = 0; continue; }
+
+    const d = Math.hypot(p.x - o.cx, p.y - o.cy);
+    const minD = p.r + o.r;
+    const touching = d < minD + 6;   // 6px buffer on top of hard collision
+
+    if (touching) {
+      o._contactT += dt;
+      if (o._contactT >= 0.35) {
+        p.hp        = Math.max(0, p.hp - 1);
+        p.hurtT     = 1.8;
+        o._contactT = 0;
+        G.dmgFlash  = 1.0;
+        sndHurt();
+        // Knockback away from creature
+        const ang = Math.atan2(p.y - o.cy, p.x - o.cx);
+        p.x = clamp(p.x + Math.cos(ang) * 65, p.r, VW - p.r);
+        p.y = clamp(p.y + Math.sin(ang) * 65, PZ.t + p.r, PZ.b - p.r);
+        spawnParts(p.x, p.y, '#ff2020', 10);
+
+        if (p.hp <= 0) {
+          showNotif('Overwhelmed.', '', 2.0);
+          p.hurtT = 99; // freeze damage until reset
+          setTimeout(() => { p.hp = p.maxHp; p.hurtT = 0; resetLevel(); }, 900);
+        } else {
+          const msgs = ['Watch out!', 'Too close!', 'Get back!'];
+          showNotif(msgs[Math.min(2, 3 - p.hp)], '', 1.5);
+        }
+        break;
+      }
+    } else {
+      o._contactT = Math.max(0, o._contactT - dt * 4);
+    }
+  }
+}
+
 function checkLevelEvents() {
   if (G.lvIdx===5 && !G.ls.selfClear && G.player.selfLbls.length===0) G.ls.selfClear = true;
 }
@@ -1633,7 +1845,8 @@ function render() {
   drawParts();
   drawDispenserTimers();
   drawDarkZone();
-  if (G.flash > 0) { ctx.fillStyle=`rgba(230,210,150,${G.flash*0.2})`; ctx.fillRect(0,0,VW,VH); }
+  if (G.flash    > 0) { ctx.fillStyle=`rgba(230,210,150,${G.flash*0.2})`;    ctx.fillRect(0,0,VW,VH); }
+  if (G.dmgFlash > 0) { ctx.fillStyle=`rgba(220,30,20,${G.dmgFlash*0.28})`; ctx.fillRect(0,0,VW,VH); }
   drawHUD();
   if (G.introCard.active) drawIntroCard();
 
@@ -1692,6 +1905,33 @@ function drawDecor(items) {
       } else {
         ctx.fillStyle = '#c08030';
         ctx.beginPath(); ctx.roundRect(d.x, d.y, dw, dh, 6); ctx.fill();
+      }
+    } else if (d.type === 'crate') {
+      // Draw only the pixel-art content region (sx=98,sy=84,sw=309,sh=319 in 500×500)
+      const dw = d.w ?? 60, dh = d.h ?? 60;
+      const spr = SPR.crate_prop;
+      if (spr && spr.complete && spr.naturalWidth > 0) {
+        ctx.drawImage(spr, 98, 84, 309, 319, d.x, d.y, dw, dh);
+      } else {
+        ctx.fillStyle = '#8a5a2a'; ctx.fillRect(d.x, d.y, dw, dh);
+      }
+    } else if (d.type === 'pillar') {
+      // Draw only the pixel-art content region (sx=60,sy=48,sw=196,sh=675 in 316×790)
+      const dw = d.w ?? 36, dh = d.h ?? 100;
+      const spr = SPR.stone_pillar;
+      if (spr && spr.complete && spr.naturalWidth > 0) {
+        ctx.drawImage(spr, 60, 48, 196, 675, d.x, d.y, dw, dh);
+      } else {
+        ctx.fillStyle = '#888078'; ctx.fillRect(d.x, d.y, dw, dh);
+      }
+    } else if (d.type === 'fence') {
+      // Draw only the pixel-art content region (sx=103,sy=55,sw=501,sh=242 in 707×353)
+      const dw = d.w ?? 120, dh = d.h ?? 52;
+      const spr = SPR.wooden_fence;
+      if (spr && spr.complete && spr.naturalWidth > 0) {
+        ctx.drawImage(spr, 103, 55, 501, 242, d.x, d.y, dw, dh);
+      } else {
+        ctx.fillStyle = '#7a4e18'; ctx.fillRect(d.x, d.y, dw, dh);
       }
     }
     ctx.restore();
@@ -1775,7 +2015,7 @@ function drawWallVisuals() {
     // and any trunk collision walls added by addTreeWalls (w.w < 40 and h < 50)
     if (w.y < PZ.t || w.y >= PZ.b || w.w === VW || w.isWater) continue;
     if (w.x === 0 || w.x + w.w >= VW) continue;  // hide screen-border walls
-    if (w._trunk) continue;                         // hide invisible trunk walls
+    if (w._trunk || w._prop) continue;               // hide invisible trunk/prop collision walls
     if (w.type === 'engine') continue;               // engine body drawn via sprite, not as a rect
     ctx.fillStyle = PAL.wall;
     ctx.fillRect(w.x, w.y, w.w, w.h);
@@ -1864,25 +2104,53 @@ function drawGate(o) {
 
 // ── BRIDGE ────────────────────────────────────────────────────────
 function drawBridge(o) {
+  // Procedural bridge — extends 14px into land on each side so corners touch grass
+  const OVHG = 14;
+  const bx = o.x - OVHG, by = o.y, bw = o.w + OVHG*2, bh = o.h;
   const n = o.labels.length;
-  const pc = n>1?'#a06820':n===1?'#b08030':PAL.bridge_plank;
-  const rc = n>1?'#703810':n===1?'#905820':PAL.bridge_rail;
-  const nPlanks = 5, ph = Math.floor((o.h-12)/nPlanks);
+  const pc = n>1?'#9a5c14':n===1?'#a86820':PAL.bridge_plank;
+  const rc = n>1?'#6a3808':n===1?'#7a4810':PAL.bridge_rail;
+
+  // Horizontal planks running east-west (direction of travel)
+  const nPlanks = Math.max(4, Math.round(bh / 18));
+  const ph = bh / nPlanks;
   for (let i=0; i<nPlanks; i++) {
-    const py = o.y+6+i*ph;
-    ctx.fillStyle = i%2===0 ? pc : shadeColor(pc,-20);
-    ctx.fillRect(o.x+4, py, o.w-8, ph-2);
+    ctx.fillStyle = i%2===0 ? pc : shadeColor(pc,-18);
+    ctx.fillRect(bx, by + i*ph, bw, Math.ceil(ph));
   }
-  ctx.fillStyle = rc; ctx.fillRect(o.x,o.y,o.w,6); ctx.fillRect(o.x,o.y+o.h-6,o.w,6);
-  for (let px=o.x+20; px<o.x+o.w-10; px+=50) ctx.fillRect(px,o.y,8,o.h);
-  ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=2; ctx.strokeRect(o.x,o.y,o.w,o.h);
+  // Plank gap lines
+  ctx.strokeStyle='rgba(0,0,0,0.30)'; ctx.lineWidth=1;
+  for (let i=1; i<nPlanks; i++) {
+    ctx.beginPath(); ctx.moveTo(bx, by+i*ph); ctx.lineTo(bx+bw, by+i*ph); ctx.stroke();
+  }
+  // Rope rails top & bottom
+  ctx.fillStyle=rc;
+  ctx.fillRect(bx, by, bw, 7);
+  ctx.fillRect(bx, by+bh-7, bw, 7);
+  // Rail highlight line
+  ctx.strokeStyle='rgba(255,255,255,0.18)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(bx,by+3); ctx.lineTo(bx+bw,by+3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx,by+bh-4); ctx.lineTo(bx+bw,by+bh-4); ctx.stroke();
+  // Corner posts (rest on land)
+  const pw=11;
+  ctx.fillStyle=shadeColor(rc,-12);
+  ctx.fillRect(bx,    by, pw, bh);
+  ctx.fillRect(bx+bw-pw, by, pw, bh);
+  ctx.strokeStyle='rgba(0,0,0,0.45)'; ctx.lineWidth=1;
+  ctx.strokeRect(bx,    by, pw, bh);
+  ctx.strokeRect(bx+bw-pw, by, pw, bh);
+  // Outer border
+  ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=1.5;
+  ctx.strokeRect(bx, by, bw, bh);
+
+  // Danger shimmer when labeled wrong
   if (n > 0) {
-    const t = Date.now()*0.005, s = n>1?1:0.5;
+    const t=Date.now()*0.005, s=n>1?1:0.5;
     ctx.strokeStyle=`rgba(220,80,20,${0.3*s})`; ctx.lineWidth=1.5;
     ctx.beginPath();
-    for (let x=o.x; x<o.x+o.w; x+=10) {
-      const wy = o.y+o.h/2+Math.sin(t+x*0.1)*5*s;
-      x===o.x ? ctx.moveTo(x,wy) : ctx.lineTo(x,wy);
+    for (let x=bx; x<bx+bw; x+=10) {
+      const wy=by+bh/2+Math.sin(t+x*0.1)*5*s;
+      x===bx?ctx.moveTo(x,wy):ctx.lineTo(x,wy);
     }
     ctx.stroke();
   }
@@ -1900,8 +2168,29 @@ function drawCreature(o) {
   if (!o.visible) return;
   const cx=o.cx, cy=o.cy, r=o.r;
   const happy = o.isNeutral;
-  const key = happy ? 'creature_happy' : 'creature';
-  const spr = SPR[key];
+
+  // Danger aura — only for patrol creatures (the ones that actually deal damage)
+  if (o.hasLabel && o.canErase && o.patrol) {
+    const pulse = 0.38 + Math.sin(Date.now() * 0.005) * 0.22;
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    const grad = ctx.createRadialGradient(cx, cy, r * 0.55, cx, cy, r * 1.55);
+    grad.addColorStop(0, 'rgba(220,30,10,0.55)');
+    grad.addColorStop(1, 'rgba(200,10,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 1.55, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Sprite logic:
+  //   neutral or accurate label (TAME/DOCILE/GENTLE) → happy  (content, correctly named)
+  //   wrong label + patrol                            → angry  (hostile, dangerous)
+  //   wrong label + stationary                        → creature.png (sad, lost/stuck)
+  let sprKey;
+  if (o.isNeutral || !o.canErase) sprKey = 'creature_happy';
+  else if (o.patrol)               sprKey = 'creature_angry';
+  else                             sprKey = 'creature';
+  const spr = SPR[sprKey] ?? SPR['creature'];
   if (spr && spr.complete && spr.naturalWidth > 0) {
     ctx.drawImage(spr, cx-r, cy-r, r*2, r*2);
     return;
@@ -1918,27 +2207,33 @@ function drawCreature(o) {
 function drawWheel(o) {
   const cx=o.cx, cy=o.cy, r=o.r;
   const angle = o.nudge ? o.nudge.value*Math.PI*2 : 0;
-  ctx.strokeStyle=PAL.wheel_rim; ctx.lineWidth=10;
-  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-  ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=2;
-  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
-  for (let i=0; i<8; i++) {
-    const a = angle+i*Math.PI/4;
-    const px=cx+Math.cos(a)*r*0.88, py=cy+Math.sin(a)*r*0.88;
-    ctx.strokeStyle=PAL.wheel_spoke; ctx.lineWidth=7; ctx.lineCap='round';
-    ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*16,cy+Math.sin(a)*16); ctx.lineTo(px,py); ctx.stroke();
-    ctx.fillStyle='#c07820';
+  const spr = SPR.wheel;
+  if (spr && spr.complete && spr.naturalWidth > 0) {
+    const d = r*2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.drawImage(spr, -r, -r, d, d);
+    ctx.restore();
+    // Alignment indicator dot — green when aligned, white otherwise
     ctx.beginPath();
-    const tx=cx+Math.cos(a+0.35)*r*0.72, ty=cy+Math.sin(a+0.35)*r*0.72;
-    ctx.moveTo(px,py); ctx.lineTo(tx,ty);
-    ctx.lineTo(tx+Math.cos(a+Math.PI/2)*12,ty+Math.sin(a+Math.PI/2)*12);
-    ctx.lineTo(px+Math.cos(a+Math.PI/2)*12,py+Math.sin(a+Math.PI/2)*12);
-    ctx.closePath(); ctx.fill();
+    ctx.arc(cx+Math.cos(angle)*r*0.72, cy+Math.sin(angle)*r*0.72, 5, 0, Math.PI*2);
+    ctx.fillStyle = o.active ? '#80e050' : 'rgba(255,255,255,0.55)';
+    ctx.fill();
+  } else {
+    // Procedural fallback
+    ctx.strokeStyle=PAL.wheel_rim; ctx.lineWidth=10;
+    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke();
+    for (let i=0; i<8; i++) {
+      const a=angle+i*Math.PI/4;
+      ctx.strokeStyle=PAL.wheel_spoke; ctx.lineWidth=7; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*16,cy+Math.sin(a)*16);
+      ctx.lineTo(cx+Math.cos(a)*r*0.88,cy+Math.sin(a)*r*0.88); ctx.stroke();
+    }
+    ctx.fillStyle='#b09050'; ctx.beginPath(); ctx.arc(cx,cy,16,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=o.active?'#80e050':'rgba(255,255,255,0.6)'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(angle)*r*0.75,cy+Math.sin(angle)*r*0.75); ctx.stroke();
   }
-  ctx.fillStyle='#b09050'; ctx.beginPath(); ctx.arc(cx,cy,16,0,Math.PI*2); ctx.fill();
-  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=2.5; ctx.beginPath(); ctx.arc(cx,cy,16,0,Math.PI*2); ctx.stroke();
-  ctx.strokeStyle=o.active?'#80e050':'rgba(255,255,255,0.6)'; ctx.lineWidth=3;
-  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(angle)*r*0.75,cy+Math.sin(angle)*r*0.75); ctx.stroke();
 }
 
 // ── BIRD ──────────────────────────────────────────────────────────
@@ -2358,7 +2653,14 @@ function drawPlayer() {
   ctx.fillStyle = 'rgba(0,0,0,0.18)';
   ctx.beginPath(); ctx.ellipse(p.x+3, p.y+p.r+4, p.r*0.85, 5, 0, 0, Math.PI*2); ctx.fill();
 
+  // Blink during damage immunity (hurtT 0–1.8, but not when frozen at 99)
+  const blinking = p.hurtT > 0 && p.hurtT < 90;
+  if (blinking) {
+    const bAlpha = 0.30 + Math.abs(Math.sin(Date.now() * 0.022)) * 0.55;
+    ctx.save(); ctx.globalAlpha = bAlpha;
+  }
   drawPlayerAt(p.x, p.y, false);
+  if (blinking) ctx.restore();
 
   // Self-label orbs orbiting player
   const nl = p.selfLbls.length;
@@ -2433,7 +2735,7 @@ function drawHUD() {
   // Bottom hint bar
   ctx.fillStyle = PAL.hint; ctx.fillRect(0, PZ.b, VW, VH-PZ.b);
   let hintTxt = '', hintCol = PAL.c_main;
-  if (G.denyNotif > 0) { hintTxt = 'That label is correct.'; hintCol = PAL.c_deny; }
+  if (G.denyNotif > 0) { hintTxt = G.denyMsg || 'That label is correct.'; hintCol = PAL.c_deny; }
   else if (G.eraseTarget) {
     const acc = G.eraseTarget.labels.length>0 && G.eraseTarget.labels[0].acc;
     if (G.eraseTarget.type==='mirror') hintTxt = G.eraseHold>0?'Erasing…':'Hold E — erase a label from yourself';
@@ -2481,6 +2783,55 @@ function drawHUD() {
     ctx.fillStyle='#8060d0'; ctx.font='11px "Courier New",monospace';
     ctx.textAlign='left'; ctx.textBaseline='middle';
     ctx.fillText(`carrying ${nl} label${nl>1?'s':''}`, 14, PZ.b+(VH-PZ.b)/2);
+  }
+
+  // Key inventory indicator — shown when player is holding a key item
+  if (G.player.inventory.length > 0) {
+    const kx = nl > 0 ? 148 : 14;
+    const ky = PZ.b + (VH - PZ.b) / 2;
+    ctx.save();
+    ctx.strokeStyle = '#d4a830'; ctx.fillStyle = '#d4a830'; ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    // Key ring
+    ctx.beginPath(); ctx.arc(kx + 4, ky - 3, 4, 0, Math.PI * 2); ctx.stroke();
+    // Key shaft
+    ctx.beginPath(); ctx.moveTo(kx + 4, ky + 1); ctx.lineTo(kx + 4, ky + 9); ctx.stroke();
+    // Key teeth
+    ctx.beginPath(); ctx.moveTo(kx + 4, ky + 4); ctx.lineTo(kx + 8, ky + 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(kx + 4, ky + 7); ctx.lineTo(kx + 7, ky + 7); ctx.stroke();
+    // Label
+    ctx.fillStyle = '#b09028'; ctx.font = '10px "Courier New",monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('key', kx + 13, ky + 3);
+    ctx.restore();
+  }
+
+  // Health display — shown whenever the level has at least one solid labeled creature
+  const hasSolidCreature = G.lv?.objs?.some(o => o.type === 'creature' && o.solid);
+  if (hasSolidCreature || G.player.hp < G.player.maxHp) {
+    const p = G.player;
+    const hurtFlicker = p.hurtT > 0 && p.hurtT < 90 && Math.sin(Date.now()*0.025) > 0;
+    const HS = 18; // heart sprite render size
+    const hY  = PZ.b + (VH - PZ.b) / 2 - HS / 2;
+    const hFull  = SPR.heart_full;
+    const hEmpty = SPR.heart_empty;
+    const useSprites = hFull?.complete && hFull.naturalWidth > 0 &&
+                       hEmpty?.complete && hEmpty.naturalWidth > 0;
+    ctx.save();
+    if (hurtFlicker) ctx.globalAlpha = 0.45 + Math.abs(Math.sin(Date.now()*0.025)) * 0.55;
+    for (let i = 0; i < p.maxHp; i++) {
+      const hx = VW - 14 - (p.maxHp - 1 - i) * (HS + 3);
+      if (useSprites) {
+        const spr = i < p.hp ? hFull : hEmpty;
+        ctx.drawImage(spr, hx, hY, HS, HS);
+      } else {
+        // Text fallback
+        ctx.font = '15px "Courier New",monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillStyle = i < p.hp ? '#e04040' : '#442020';
+        ctx.fillText(i < p.hp ? '♥' : '♡', hx + HS/2, hY + HS/2);
+      }
+    }
+    ctx.restore();
   }
 
   // Nudge alignment bar
@@ -2619,171 +2970,191 @@ function drawTitle() {
   _strokeFill('WASD — move   hold E — erase   TAB — guide   R — reset', VW/2, 490);
 }
 
-// ── LEVEL COMPLETE ────────────────────────────────────────────────
-function drawComplete() {
-  // Draw level behind
-  drawFloor(G.lv.bg);
-  if (G.lv.water) drawWater(G.lv.water);
-  drawWallVisuals();
-  for (const o of G.lv.objs) drawObj(o);
-  drawPlayer();
-  drawParts();
-  ctx.fillStyle='rgba(10,8,6,0.72)'; ctx.fillRect(0,0,VW,VH);
-  const slide = Math.min(1, G.completeClock*2.5);
-  ctx.save(); ctx.globalAlpha=slide;
-  rr(VW/2-200,158,400,252,10); ctx.fillStyle='rgba(16,12,8,0.96)'; ctx.fill();
-  ctx.strokeStyle='rgba(192,152,30,0.5)'; ctx.lineWidth=1.5; rr(VW/2-200,158,400,252,10); ctx.stroke();
-  ctx.fillStyle=PAL.c_gold; ctx.font='bold 22px "Courier New",monospace';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText('✓  Level complete', VW/2, 210);
-  const lv = G.lv;
-  if (lv.grantLabel) {
-    ctx.fillStyle=PAL.c_dim; ctx.font='12px "Courier New",monospace';
-    ctx.fillText('You leave this place carrying:', VW/2, 258);
-    ctx.fillStyle='#8060d0'; ctx.font='bold 15px "Courier New",monospace';
-    ctx.fillText('"'+lv.grantLabel+'"', VW/2, 284);
-  }
-  if (G.completeClock > 0.8) {
-    const pulse = Math.sin(Date.now()*0.003)*0.3+0.7;
-    ctx.fillStyle=`rgba(236,224,200,${pulse})`; ctx.font='13px "Courier New",monospace';
-    ctx.fillText('Press E to continue', VW/2, 368);
-  }
-  ctx.restore();
-}
-
-// ── ENDING ────────────────────────────────────────────────────────
-function drawEnding() {
-  const t = G.endingT;
-  ctx.fillStyle='#080604'; ctx.fillRect(0,0,VW,VH);
-  if (t < 0.5) return;
-  const a = Math.min(1,(t-0.5)*0.9);
-  ctx.save(); ctx.globalAlpha=a;
-  ctx.fillStyle='#ece0c8'; ctx.font='bold 34px "Courier New",monospace';
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  ctx.fillText('The machine is quiet.', VW/2, 195);
-  if (t > 2) {
-    ctx.globalAlpha=Math.min(1,(t-2)*0.7)*a;
-    ctx.fillStyle='#908070'; ctx.font='15px "Courier New",monospace';
-    ['The labels are gone.','Things are what they are again.','','The world is lighter.']
-      .forEach((l,i) => ctx.fillText(l, VW/2, 280+i*30));
-  }
-  if (t > 4.5) {
-    ctx.globalAlpha=Math.min(1,(t-4.5)*0.5)*a;
-    ctx.fillStyle='#604838'; ctx.font='12px "Courier New",monospace';
-    ctx.fillText('UNSAYING — thank you for playing', VW/2, 440);
-  }
-  if (t > 6) {
-    const pulse = Math.sin(t*2.5)*0.3+0.7;
-    ctx.globalAlpha = Math.min(1,(t-6)*0.7)*a*pulse;
-    ctx.fillStyle='#a09060'; ctx.font='bold 13px "Courier New",monospace';
-    ctx.fillText('Press E to see credits', VW/2, 490);
-  }
-  ctx.restore();
-}
-
-// ── SPLASH SCREEN ────────────────────────────────────────────────
-// Shown before the menu: displays Intro_Screen.png and plays intro_sound.wav.
-// Auto-advances after 2 seconds; any key skips immediately.
+// ── SPLASH SCREEN ─────────────────────────────────────────────────
 function drawSplash() {
-  const spr = SPR.intro_splash;
-  ctx.fillStyle = '#060402';
-  ctx.fillRect(0, 0, VW, VH);
-  if (spr && spr.complete && spr.naturalWidth > 0) {
-    // Cover-scale: fill canvas, crop edges if needed
-    const iw = spr.naturalWidth, ih = spr.naturalHeight;
-    const scale = Math.max(VW / iw, VH / ih);
-    const dw = iw * scale, dh = ih * scale;
-    ctx.drawImage(spr, (VW - dw) / 2, (VH - dh) / 2, dw, dh);
-  }
-  // Fade in
-  const fadeIn = Math.min(1, G.splashT / 0.35);
-  if (fadeIn < 1) {
-    ctx.fillStyle = `rgba(6,4,2,${1 - fadeIn})`;
-    ctx.fillRect(0, 0, VW, VH);
-  }
-  // Fade out in the last 0.4s
-  if (G.splashT > 1.6) {
-    const fadeOut = Math.min(1, (G.splashT - 1.6) / 0.4);
-    ctx.fillStyle = `rgba(6,4,2,${fadeOut})`;
-    ctx.fillRect(0, 0, VW, VH);
-  }
-}
-
-// ── CREDITS SCREEN ───────────────────────────────────────────────
-// Shown after the ending. Displays studio logo, "Made by Berry", BuzzHornet Studios.
-function drawCredits() {
-  ctx.fillStyle = '#060402';
-  ctx.fillRect(0, 0, VW, VH);
-  const t = G.creditsT;
-  const a = Math.min(1, t * 1.2);
-  ctx.save();
-
-  // Studio logo — scale down the large 8334×8334 PNG to a usable size
-  const logo = SPR.studio_logo;
-  if (logo && logo.complete && logo.naturalWidth > 0) {
-    const logoSize = 180;
-    ctx.globalAlpha = a;
-    ctx.drawImage(logo, VW / 2 - logoSize / 2, 100, logoSize, logoSize);
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,VW,VH);
+  const t = G.splashT;
+  const fadeIn  = Math.min(1, t/0.4);
+  const fadeOut = t > 1.6 ? Math.max(0, 1-(t-1.6)/0.4) : 1;
+  const alpha   = fadeIn * fadeOut;
+  const spl = SPR.intro_splash;
+  if (spl && spl.complete && spl.naturalWidth > 0) {
+    const bw=spl.naturalWidth, bh=spl.naturalHeight;
+    const scale=Math.min(VW/bw, VH/bh);
+    ctx.globalAlpha=alpha;
+    ctx.drawImage(spl,(VW-bw*scale)/2,(VH-bh*scale)/2,bw*scale,bh*scale);
+    ctx.globalAlpha=1;
   } else {
-    // Fallback hex placeholder
-    ctx.globalAlpha = a * 0.3;
-    ctx.fillStyle = '#c09820';
-    ctx.beginPath(); ctx.arc(VW/2, 190, 80, 0, Math.PI*2); ctx.fill();
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.font='bold 22px "Courier New",monospace';
+    ctx.fillStyle=`rgba(200,185,155,${alpha})`;
+    ctx.fillText('BUZZHORNET STUDIOS', VW/2, VH/2);
   }
-
-  // Credits text
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.globalAlpha = Math.min(1, Math.max(0, (t - 0.3) * 1.4));
-
-  ctx.font = 'bold 11px "Courier New",monospace';
-  ctx.fillStyle = '#908070';
-  ctx.fillText('MADE BY', VW / 2, 318);
-
-  ctx.font = 'bold 28px "Courier New",monospace';
-  ctx.fillStyle = '#ece0c8';
-  ctx.fillText('Berry', VW / 2, 358);
-
-  ctx.font = '16px "Courier New",monospace';
-  ctx.fillStyle = '#c09830';
-  ctx.fillText('BuzzHornet Studios', VW / 2, 402);
-
-  // Divider line
-  ctx.globalAlpha = Math.min(1, Math.max(0, (t - 0.6) * 1.2));
-  ctx.strokeStyle = 'rgba(192,152,30,0.3)'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(VW/2 - 130, 432); ctx.lineTo(VW/2 + 130, 432); ctx.stroke();
-
-  // Return prompt
-  if (t > 1.5) {
-    const pulse = Math.sin(t * 2.5) * 0.3 + 0.7;
-    ctx.globalAlpha = Math.min(1, (t - 1.5) * 0.8) * pulse;
-    ctx.font = '11px "Courier New",monospace';
-    ctx.fillStyle = 'rgba(160,140,100,0.9)';
-    ctx.fillText('Press E to return to menu', VW / 2, 490);
-  }
-
-  ctx.restore();
 }
 
-// ── GAME LOOP ─────────────────────────────────────────────────────
-let lastT = 0;
+// ── LEVEL COMPLETE ───────────────────────────────────────────────
+function drawComplete() {
+  const lv = G.lv;
+  drawFloor(lv.bg);
+  if (lv.water) drawWater(lv.water);
+  drawWallVisuals();
+  drawDecor(lv.decor);
+  for (const o of lv.objs) drawObj(o);
+  drawPlayer();
+  drawHUD();
+  const t = G.completeClock;
+  const ov = Math.min(0.6, t*1.2);
+  ctx.fillStyle=`rgba(0,0,0,${ov})`; ctx.fillRect(0,0,VW,VH);
+  const ca = Math.min(1, t*2.2);
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.lineJoin='round';
+  ctx.font='bold 30px "Courier New",monospace';
+  ctx.lineWidth=6; ctx.strokeStyle=`rgba(0,0,0,${ca*0.9})`;
+  ctx.fillStyle=`rgba(236,224,200,${ca})`;
+  _strokeFill(lv.solveMsg||'Done.', VW/2, 218);
+  ctx.font='14px "Courier New",monospace';
+  ctx.lineWidth=4; ctx.strokeStyle=`rgba(0,0,0,${ca*0.85})`;
+  ctx.fillStyle=`rgba(160,140,100,${ca})`;
+  _strokeFill(lv.name||'', VW/2, 264);
+  if (G.player.selfLbls.length>0) {
+    ctx.font='13px "Courier New",monospace';
+    ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${ca*0.8})`;
+    ctx.fillStyle=`rgba(212,168,48,${ca})`;
+    _strokeFill('You are: '+G.player.selfLbls.join(', '), VW/2, 310);
+  }
+  if (t>0.8) {
+    const pulse=Math.sin(t*3)*0.25+0.75;
+    ctx.font='bold 14px "Courier New",monospace';
+    ctx.lineWidth=4; ctx.strokeStyle=`rgba(0,0,0,${pulse*0.9})`;
+    ctx.fillStyle=`rgba(220,175,40,${pulse*ca})`;
+    _strokeFill('PRESS E TO CONTINUE', VW/2, 390);
+  }
+}
+
+// ── ENDING ─────────────────────────────────────────────────────────────
+function drawEnding() {
+  ctx.fillStyle='#080604'; ctx.fillRect(0,0,VW,VH);
+  const t=G.endingT;
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.lineJoin='round';
+  const lines=[
+    'You have erased every wrong label.',
+    'The world remembers what it was.',
+    '',
+    'You are: '+(G.player.selfLbls.join(', ')||'yourself.'),
+    '',
+    'That was always enough.',
+  ];
+  ctx.font='15px "Courier New",monospace';
+  ctx.lineWidth=3; ctx.strokeStyle='rgba(0,0,0,0.85)';
+  lines.forEach((line,i)=>{
+    const a=Math.min(1,Math.max(0,(t-i*1.0)*1.8));
+    if (a<=0||line==='') return;
+    ctx.fillStyle=`rgba(200,185,155,${a})`;
+    _strokeFill(line, VW/2, 185+i*40);
+  });
+  if (t>6) {
+    const pulse=Math.sin(t*2)*0.2+0.8;
+    ctx.font='13px "Courier New",monospace';
+    ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${pulse*0.8})`;
+    ctx.fillStyle=`rgba(140,120,80,${pulse})`;
+    _strokeFill('PRESS E TO CONTINUE', VW/2, 490);
+  }
+}
+
+// ── CREDITS ─────────────────────────────────────────────────────────────
+function drawCredits() {
+  ctx.fillStyle='#060402'; ctx.fillRect(0,0,VW,VH);
+  const t=G.creditsT;
+  const a=Math.min(1,t*1.5);
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.lineJoin='round';
+
+  // Studio logo
+  const logo=SPR.studio_logo;
+  if (logo&&logo.complete&&logo.naturalWidth>0) {
+    const lw=Math.min(160,logo.naturalWidth), lh=lw*(logo.naturalHeight/logo.naturalWidth);
+    ctx.globalAlpha=a;
+    ctx.drawImage(logo,(VW-lw)/2, 80, lw, lh);
+    ctx.globalAlpha=1;
+  }
+
+  // Game title
+  ctx.font='bold 36px "Courier New",monospace';
+  ctx.lineWidth=6; ctx.strokeStyle=`rgba(0,0,0,${a*0.9})`;
+  ctx.fillStyle=`rgba(220,200,160,${a})`;
+  _strokeFill('UNSAYING', VW/2, 230);
+
+  ctx.font='12px "Courier New",monospace';
+  ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${a*0.8})`;
+  ctx.fillStyle=`rgba(140,120,90,${a})`;
+  _strokeFill('a puzzle about wrong labels', VW/2, 264);
+
+  // Clean credits — no real names, no asset credits
+  ctx.font='14px "Courier New",monospace';
+  ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${a*0.8})`;
+  ctx.fillStyle=`rgba(170,152,120,${a})`;
+  _strokeFill('Made by', VW/2, 330);
+
+  ctx.font='bold 20px "Courier New",monospace';
+  ctx.lineWidth=4; ctx.strokeStyle=`rgba(0,0,0,${a*0.9})`;
+  ctx.fillStyle=`rgba(212,168,48,${a})`;
+  _strokeFill('Berry', VW/2, 362);
+
+  ctx.font='15px "Courier New",monospace';
+  ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${a*0.8})`;
+  ctx.fillStyle=`rgba(212,168,48,${a})`;
+  _strokeFill('BuzzHornet Studio', VW/2, 392);
+
+  // Thank you
+  ctx.font='14px "Courier New",monospace';
+  ctx.fillStyle=`rgba(200,185,155,${a})`;
+  ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${a*0.8})`;
+  _strokeFill('Thank you for playing.', VW/2, 448);
+
+  // Press to return
+  if (t>1.5) {
+    const pulse=Math.sin(t*2)*0.2+0.8;
+    ctx.font='11px "Courier New",monospace';
+    ctx.lineWidth=3; ctx.strokeStyle=`rgba(0,0,0,${pulse*0.8})`;
+    ctx.fillStyle=`rgba(100,90,70,${pulse})`;
+    _strokeFill('PRESS SPACE TO RETURN TO TITLE', VW/2, 510);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  MAIN LOOP
+// ════════════════════════════════════════════════════════════════
+let _lastTs=0;
+let _errMsg='';
 function loop(ts) {
-  const dt = (ts - lastT) / 1000;
-  lastT = ts;
-  tick(dt);
-  render();
+  // Schedule next frame FIRST so errors never kill the loop
   requestAnimationFrame(loop);
+  const dt=Math.min((ts-_lastTs)*0.001, 0.05);
+  _lastTs=ts;
+  try {
+    tick(dt);
+    render();
+  } catch(e) {
+    // Draw the error on-canvas so it's visible in the browser
+    _errMsg = e.message + ' — ' + (e.stack||'').split('\n')[1];
+    try {
+      ctx.save();
+      ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle='#f55'; ctx.font='13px monospace';
+      ctx.textAlign='left'; ctx.textBaseline='top';
+      ctx.fillText('JS ERROR: ' + e.message, 10, 10);
+            (e.stack||'').split('\n').slice(0,6).forEach((l,i)=>ctx.fillText(l,10,30+i*16));
+      ctx.restore();
+    } catch(_){}
+  }
 }
-// Audio unlocks on the first user interaction (browser autoplay policy).
-// resumeAC() is idempotent — safe to call on every click/keydown.
-// Intro sound is also triggered here — the only moment the browser allows it.
-function _onFirstInteraction() {
+
+// First interaction: unlock audio context + play intro sound once
+window.addEventListener('pointerdown', function _firstTouch() {
   resumeAC();
   if (!G.splashSndPlayed) {
-    G.splashSndPlayed = true;
-    _introSfx.currentTime = 0;
-    _introSfx.play().catch(() => {});
+    G.splashSndPlayed=true;
+    _introSfx.play().catch(()=>{});
   }
-}
-window.addEventListener('click',   _onFirstInteraction, {once:true});
-window.addEventListener('keydown', _onFirstInteraction, {once:true});
-requestAnimationFrame(ts => { lastT=ts; requestAnimationFrame(loop); });
+}, {once:true});
+
+// Kick off
+requestAnimationFrame(loop);
